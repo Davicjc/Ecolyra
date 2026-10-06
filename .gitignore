@@ -1,0 +1,8 @@
+# dados pessoais / gerados na máquina de cada um
+cache/
+config.json
+posicao.txt
+__pycache__/
+*.pyc
+*_backup*.pyw
+release/
