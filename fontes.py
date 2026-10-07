@@ -383,17 +383,26 @@ def casar_catalogo(titulo, artista, dur=0, texto_ref=""):
     """Acha no catálogo a faixa 'oficial' de um título/artista vindos de link ou vídeo (nome limpo,
     capa HD, duração certa). texto_ref = título do vídeo + canal, para conferir."""
     ref = normalizar(texto_ref or f"{titulo} {artista}")
+    coletanea = r"hits|decades|best of|greatest|collection|cole[cç][aã]o|now that|compilation|anos \d0|\d0s|vol\.|karaoke|workout|party"
     for q in dict.fromkeys(x for x in (f"{artista} {titulo}".strip(), titulo) if x):
-        for f in juntar(deezer_busca(q, 10), itunes_busca(q, 10)):
+        dz, it = _paralelo(lambda: deezer_busca(q, 15), lambda: itunes_busca(q, 15))
+        bons = []
+        for rank, f in enumerate((dz or []) + (it or [])):  # sem juntar: cada versão/álbum conta
             nome = normalizar(limpar_titulo(f["titulo"]))
             arts = [normalizar(x) for x in re.split(r",|&|×|\bx\b|feat\.?|ft\.?", f["artista"], flags=re.I)]
             if len(nome) < 2 or nome not in ref:
                 continue
             if not any(len(x) >= 2 and x in ref for x in arts):
                 continue
-            if dur and f["duracao"] and abs(f["duracao"] - dur) > 90:
+            diff = abs(f["duracao"] - dur) if dur and f["duracao"] else 0
+            if diff > 90:
                 continue
-            return f
+            # versão original: duração mais perto, fora de coletânea, nome exato, mais bem colocada na busca
+            pontos = (min(diff, 30) + (25 if re.search(coletanea, f.get("album", ""), re.I) else 0)
+                      + (6 if nome != normalizar(limpar_titulo(titulo)) else 0) + rank * 0.3)
+            bons.append((pontos, rank, f))
+        if bons:
+            return min(bons, key=lambda x: (x[0], x[1]))[2]
     return None
 
 
@@ -672,6 +681,8 @@ def escolher_videos(titulo, artista, dur=0, tipo="audio"):
                 p -= 3
             if dur and abs(v["duracao"] - dur) > 240:
                 p -= 3
+            if dur and v["duracao"] < dur * 0.6:  # trecho/anúncio
+                p -= 5
         pontuados.append((-p, len(pontuados), v))
     return [v for _, _, v in sorted(pontuados)][:6]
 

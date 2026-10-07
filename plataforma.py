@@ -97,6 +97,8 @@ def tarefa(fn, *args):
 
 def capa_bytes(d):
     url = d.get("capa_hd") or d.get("capa") or ""
+    if url.startswith("data:image/"):  # capa já embutida (ex.: arte gerada)
+        return base64.b64decode(url.split(",", 1)[1])
     return (posts.capa_hd(d.get("titulo", ""), d.get("artista", "")) if not url else None) or fontes.baixar_capa(url) \
         or posts.capa_hd(d.get("titulo", ""), d.get("artista", ""))
 
@@ -253,6 +255,9 @@ class Handler(BaseHTTPRequestHandler):
         if rota == "tocar":  # a plataforma vai tocar esta música: já deixa a letra pronta para o overlay
             ctx["preparar_interno"](d)
             return {"ok": True}
+        if rota == "pagina/cmd":  # manda um comando para a janela da plataforma (ex.: tocar uma música)
+            pagina["cmds"].append({"cmd": d.get("cmd"), "arg": d.get("arg")})
+            return {"ok": True, "aberta": pagina_aberta()}
         if rota == "ajuste":
             ctx["ajustar"](d.get("delta"))
             return {"ok": True}
@@ -326,7 +331,8 @@ def iniciar(funcoes):
 
 
 def url(rota=""):
-    return f"http://127.0.0.1:{PORTA}/" + (f"#{rota}" if rota else "")
+    # "localhost" e não 127.0.0.1: com origem em IP o YouTube recusa o embed (erro 150)
+    return f"http://localhost:{PORTA}/" + (f"#{rota}" if rota else "")
 
 
 def pagina_aberta():
@@ -346,7 +352,9 @@ def _navegador():
 
 
 def trazer_para_frente():
-    """Acha a janela da plataforma (título começa com 'Ecolyra') e traz para frente."""
+    """Acha a janela da plataforma (título começa com 'Ecolyra') e traz para frente.
+    Aberta por um processo em segundo plano (bandeja), o Windows a cria atrás das outras e o
+    navegador a trata como "oculta" (o vídeo nem começa) — minimizar e restaurar resolve as duas coisas."""
     u32 = ctypes.windll.user32
     achadas = []
     cb_t = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
@@ -356,14 +364,28 @@ def trazer_para_frente():
         u32.GetWindowTextW(hwnd, buf, 256)
         cls = ctypes.create_unicode_buffer(64)
         u32.GetClassNameW(hwnd, cls, 64)
-        if buf.value.startswith("Ecolyra") and cls.value.startswith("Chrome_WidgetWin") and u32.IsWindowVisible(hwnd):
+        if (buf.value.startswith("Ecolyra") and " - " not in buf.value and cls.value.startswith("Chrome_WidgetWin")
+                and u32.IsWindowVisible(hwnd)):
             achadas.append(hwnd)
         return True
     u32.EnumWindows(cb_t(cb), 0)
     for h in achadas:
+        if u32.GetForegroundWindow() != h:
+            u32.ShowWindow(h, 6)  # SW_MINIMIZE
         u32.ShowWindow(h, 9)  # SW_RESTORE
+        # o Windows só deixa roubar o foco se "uma tecla acabou de ser usada": um Alt solto libera
+        u32.keybd_event(0x12, 0, 0, 0)
+        u32.keybd_event(0x12, 0, 2, 0)
         u32.SetForegroundWindow(h)
+        u32.BringWindowToTop(h)
     return bool(achadas)
+
+
+def _esperar_e_trazer():
+    for _ in range(30):
+        time.sleep(0.4)
+        if trazer_para_frente():
+            return
 
 
 def abrir(rota="", compacta=False):
@@ -378,6 +400,7 @@ def abrir(rota="", compacta=False):
         return
     perfil = os.path.join(os.environ.get("LOCALAPPDATA", PASTA), "Ecolyra", "janela")
     tam = "480,860" if compacta else "1320,860"
+    threading.Thread(target=_esperar_e_trazer, daemon=True).start()
     subprocess.Popen([nav, f"--app={url(rota)}", f"--user-data-dir={perfil}", f"--window-size={tam}",
                       "--no-first-run", "--no-default-browser-check", "--autoplay-policy=no-user-gesture-required",
                       "--disable-features=Translate,msEdgeSidebarV2"], creationflags=0x08000000)

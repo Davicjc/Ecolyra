@@ -35,7 +35,7 @@ function Abrir($py) {
 if ($SoAbrir) {
     $py = Achar-Python
     if ($py) {
-        & $py -c "import winrt.windows.media.control, pyaudiowpatch" 2>$null
+        & $py -c "import winrt.windows.media.control, pyaudiowpatch, yt_dlp, imageio_ffmpeg" 2>$null
         if ($LASTEXITCODE -eq 0) { Abrir $py | Out-Null; exit 0 }
     }
     Write-Host "O Ecolyra ainda não está instalado. Instalando agora..." -ForegroundColor Yellow
@@ -69,7 +69,7 @@ if ($LASTEXITCODE -ne 0) { Falha "Falhou ao instalar as bibliotecas (veja a mens
 # Shazam: núcleo 1.2.0 já compilado + shazamio sem puxar o 1.1.2 (que exige Rust)
 & $py @pipArgs "shazamio-core>=1.2.0"
 & $py @pipArgs --no-deps shazamio
-& $py -c "import winrt.windows.media.control, PIL, requests, pyaudiowpatch, pystray, pycaw, shazamio" 2>$null
+& $py -c "import winrt.windows.media.control, PIL, requests, pyaudiowpatch, pystray, pycaw, shazamio, yt_dlp, imageio_ffmpeg" 2>$null
 if ($LASTEXITCODE -ne 0) { Falha "Alguma biblioteca não instalou direito (veja a mensagem acima)." }
 Write-Host "       tudo certo" -ForegroundColor DarkGray
 

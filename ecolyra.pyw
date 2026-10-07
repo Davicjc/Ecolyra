@@ -44,7 +44,7 @@ import atualizador
 import plataforma
 from fontes import (LIXO, baixar_capa, buscar_letra, buscar_livre, buscar_lrclib, buscar_netease, candidatos,
                     limpar_canal, limpar_titulo, lrclib_busca, metadados_limpos, normalizar, parse_lrc)
-from posts import capa_hd, copiar_imagem, gerar_imagem, pasta_imagens
+from posts import ESTILOS, capa_hd, copiar_imagem, gerar_imagem, pasta_imagens
 from versao import CRIADOR, PORTFOLIO, REPO, VERSAO
 
 APP = "Ecolyra"
@@ -365,8 +365,8 @@ def tokens_ouvidos(palavras):
     saida = []
     for ini, fim, w in palavras:
         ts = tokens(w)
-        for k, tk in enumerate(ts):
-            saida.append((ini + (fim - ini) * k / max(1, len(ts)), tk))
+        for k, tok in enumerate(ts):
+            saida.append((ini + (fim - ini) * k / max(1, len(ts)), tok))
     return saida
 
 
@@ -1885,7 +1885,7 @@ class App:
         j.configure(bg=BG)
         j.attributes("-topmost", True)
         j.resizable(False, False)
-        estado_img = {"formato": "Stories", "orig": False, "img": None}
+        estado_img = {"formato": "Stories", "orig": False, "img": None, "estilo": cfg.get("estilo_post", "vidro")}
 
         prev = tk.Label(j, bg="#0b0b0b")
         prev.pack(side="left", padx=16, pady=16)
@@ -1903,6 +1903,20 @@ class App:
             b.pack(fill="x", pady=2)
             b.bind("<Button-1>", lambda e, n=nome: (estado_img.update(formato=n), desenhar()))
             botoes[nome] = b
+
+        titulo_secao("ESTILO")
+        b_estilos = {}
+        grade = tk.Frame(lado, bg=BG)
+        grade.pack(fill="x")
+        for k, (chave, nome) in enumerate(ESTILOS.items()):
+            b = tk.Label(grade, text=nome, bg="#1e1e1e", fg=CINZA, font=("Segoe UI Semibold", 9), padx=8, pady=6,
+                         cursor="hand2")
+            b.grid(row=k // 2, column=k % 2, sticky="ew", padx=2, pady=2)
+            b.bind("<Button-1>", lambda e, c=chave: (estado_img.update(estilo=c), cfg.update(estilo_post=c),
+                                                     salvar_cfg(), desenhar()))
+            b_estilos[chave] = b
+        grade.columnconfigure(0, weight=1)
+        grade.columnconfigure(1, weight=1)
 
         titulo_secao("TEXTO")
         b_dest = tk.Label(lado, bg="#1e1e1e", fg=CINZA, anchor="w", font=("Segoe UI Semibold", 10),
@@ -1932,7 +1946,10 @@ class App:
 
         def desenhar():
             f = estado_img["formato"]
-            img = estado_img["img"] = gerar_imagem(capa, titulo, artista, pares, f, estado_img["orig"])
+            img = estado_img["img"] = gerar_imagem(capa, titulo, artista, pares, f, estado_img["orig"], estado_img["estilo"])
+            for c, b in b_estilos.items():
+                b.config(bg=VERDE if c == estado_img["estilo"] else "#1e1e1e",
+                         fg="#000000" if c == estado_img["estilo"] else CINZA)
             alt = 640
             mini = img.resize((round(img.width * alt / img.height), alt), Image.LANCZOS)
             j.foto = ImageTk.PhotoImage(mini)

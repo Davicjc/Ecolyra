@@ -16,6 +16,10 @@ pystray>=0.19
 pycaw>=20230407
 comtypes>=1.2
 
+# plataforma: música/vídeo do YouTube e vídeo do post com a música de fundo
+yt-dlp>=2025.1
+imageio-ffmpeg>=0.5
+
 # escutar o som do PC (sincronia em vídeos)
 PyAudioWPatch>=0.2.12
 faster-whisper>=1.0

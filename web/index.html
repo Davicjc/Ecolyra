@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Ecolyra</title>
+<link rel="icon" href="icone.png">
+<link rel="stylesheet" href="estilo.css">
+<script>window.ECOLYRA = __ECOLYRA__;</script>
+</head>
+<body>
+<div class="app">
+  <aside class="lateral">
+    <a class="marca" href="#/agora" title="Ecolyra">
+      <img src="icone.png" alt="">
+      <span>Ecolyra</span>
+    </a>
+    <nav class="menu" aria-label="Seções">
+      <a href="#/agora" data-rota="agora"><svg viewBox="0 0 24 24"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg><span>Tocando agora</span></a>
+      <a href="#/buscar" data-rota="buscar"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><span>Buscar</span></a>
+      <a href="#/post" data-rota="post"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="4"/><circle cx="12" cy="12" r="4"/><circle cx="17.5" cy="6.5" r=".6"/></svg><span>Criar post</span></a>
+      <a href="#/historico" data-rota="historico"><svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3 2"/></svg><span>Histórico</span></a>
+      <a href="#/config" data-rota="config"><svg viewBox="0 0 24 24"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg><span>Configurações</span></a>
+      <a href="#/sobre" data-rota="sobre"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/></svg><span>Sobre</span></a>
+    </nav>
+    <div class="lateral-rodape">
+      <div class="fonte-agora" id="fonteAgora"></div>
+      <button class="credito" id="credito" type="button">by davicjc</button>
+    </div>
+  </aside>
+
+  <main class="vista" id="vista" tabindex="-1"></main>
+
+  <!-- o player do YouTube fica sempre aqui; muda de lugar só por CSS (mover no DOM recarregaria o vídeo) -->
+  <div class="palco oculto" id="palco">
+    <div id="yt"></div>
+    <div class="palco-barra">
+      <span id="palcoTitulo"></span>
+      <button type="button" id="palcoExpandir" title="Abrir o vídeo">
+        <svg viewBox="0 0 24 24"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <footer class="player" id="player">
+    <div class="p-musica">
+      <img id="pCapa" alt="" src="icone.png">
+      <div class="p-textos">
+        <strong id="pTitulo">Nada tocando</strong>
+        <span id="pArtista">Busque uma música ou toque no Spotify, YouTube...</span>
+      </div>
+    </div>
+    <div class="p-centro">
+      <div class="p-botoes">
+        <button type="button" data-cmd="anterior" title="Anterior"><svg viewBox="0 0 24 24"><path d="M6 5v14M19 5 9 12l10 7z"/></svg></button>
+        <button type="button" data-cmd="pp" class="p-play" id="pPlay" title="Tocar / pausar"><svg viewBox="0 0 24 24"><path d="M7 4v16l13-8z"/></svg></button>
+        <button type="button" data-cmd="proxima" title="Próxima"><svg viewBox="0 0 24 24"><path d="M18 5v14M5 5l10 7-10 7z"/></svg></button>
+      </div>
+      <div class="p-tempo">
+        <span id="pPos">0:00</span>
+        <div class="p-barra" id="pBarra"><div id="pFeito"></div></div>
+        <span id="pDur">0:00</span>
+      </div>
+    </div>
+    <div class="p-extra">
+      <div class="p-sinc" title="Sincronia da letra">
+        <button type="button" data-ajuste="-0.25" title="Atrasar a letra">−</button>
+        <span id="pSinc">0,00s</span>
+        <button type="button" data-ajuste="0.25" title="Adiantar a letra">+</button>
+      </div>
+      <button type="button" id="pVideo" title="Mostrar o vídeo"><svg viewBox="0 0 24 24"><rect x="2" y="5" width="15" height="14" rx="2"/><path d="m17 10 5-3v10l-5-3"/></svg></button>
+      <button type="button" id="pPost" title="Criar post com esta música"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="4"/><circle cx="12" cy="12" r="4"/></svg></button>
+    </div>
+  </footer>
+</div>
+
+<div class="aviso" id="aviso" role="status" aria-live="polite"></div>
+
+<script src="https://www.youtube.com/iframe_api" async></script>
+<script src="app.js"></script>
+<script src="__FOOTER_JS__" defer onerror="document.body.classList.add('sem-footer')"></script>
+</body>
+</html>
