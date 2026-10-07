@@ -954,8 +954,15 @@ def checar_update(aplicar=True):
         return
     upd.update(estado="disponivel", versao_nova=info["versao"], notas=info["notas"],
                msg=f"Versão {info['versao']} disponível")
-    if atualizador.modo_dev():
-        upd.update(estado="dev", msg=f"Versão {info['versao']} no GitHub — pasta de desenvolvimento, atualize pelo git")
+    if atualizador.modo_dev():  # pasta com .git: puxa pelo git (só se não tiver nada em edição)
+        req = open(os.path.join(PASTA, "requirements.txt"), "rb").read()
+        if aplicar and atualizador.atualizar_git():
+            if open(os.path.join(PASTA, "requirements.txt"), "rb").read() != req:
+                atualizador.instalar_dependencias()
+            upd.update(estado="instalado", msg=f"Versão {info['versao']} baixada pelo git — reiniciando...")
+            ui_fila.put(("reiniciar",))
+        else:
+            upd.update(estado="dev", msg=f"Versão {info['versao']} no GitHub — há alterações locais, atualize pelo git")
         return
     if aplicar:
         upd.update(estado="baixando")
@@ -991,6 +998,7 @@ def iniciar_plataforma():
         "comando": lambda c, a=None: comandos.put((c,) if a is None else (c, a)), "ajustar": ajustar_offset,
         "traduzir": lambda frases, idioma: traduzir(frases, idioma), "config": config_web,
         "set_config": set_config_web, "status_update": lambda: dict(upd), "atualizar": atualizar_web,
+        "mostrar": lambda: ui_fila.put(("mostrar",)),
     })
 
 
@@ -2030,6 +2038,11 @@ class App:
                 self.abrir_plataforma(pedido[1])
             elif pedido == ("pesquisar",):
                 self.pesquisar()
+            elif pedido == ("mostrar",):
+                if cfg.get("modo") == "plataforma":
+                    plataforma.abrir("/agora")
+                else:
+                    self.mostrar()
             elif pedido == ("sobre",):
                 self.sobre()
             elif pedido == ("reiniciar",):
@@ -2153,6 +2166,7 @@ if __name__ == "__main__":
             break
         except OSError:
             if not reiniciado:
+                plataforma.chamar_aberto()  # já está aberto: pede pra ele aparecer (overlay ou plataforma)
                 raise SystemExit
             time.sleep(0.5)
     else:

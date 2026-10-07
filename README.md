@@ -250,7 +250,7 @@ git archive --format=zip --prefix=Ecolyra/ -o release/Ecolyra.zip HEAD
 gh release create v2.1.0 release/Ecolyra.zip --title "Ecolyra 2.1.0" --notes "o que mudou"
 ```
 
-Pronto — todo mundo que usa o Ecolyra recebe a versão nova em até 6 horas (ou na hora, em **Verificar agora**). Uma pasta com `.git` (a sua, de desenvolvimento) só **avisa**; não sobrescreve código.
+Pronto — todo mundo que usa o Ecolyra recebe a versão nova em até 6 horas (ou na hora, em **Verificar agora**). Uma pasta com `.git` (a de desenvolvimento) não recebe o zip: ela faz `git pull --ff-only` sozinha — e só se não houver nada em edição.
 
 ## 🙏 Créditos
 

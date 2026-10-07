@@ -10,7 +10,7 @@ Como funciona (e por que o antivírus não implica):
   • se o requirements.txt mudou, roda o pip do próprio Python (janela oculta);
   • o app reinicia sozinho com o mesmo pythonw.exe que já estava rodando.
 
-Pasta com .git (a do desenvolvedor) só avisa — não sobrescreve código em edição.
+Pasta com .git (a do desenvolvedor) não recebe o zip: faz 'git pull --ff-only' se não houver nada em edição.
 """
 import hashlib
 import json
@@ -117,28 +117,46 @@ def aplicar(info, pasta=PASTA, progresso=None):
         backup = os.path.join(pasta, ".versoes", VERSAO)
         req_antes = _ler(os.path.join(pasta, "requirements.txt"))
         avisar("Instalando...")
+        trocas = []  # (origem, destino, backup|None) — só o que mudou
         for atual, pastas, arquivos in os.walk(raiz):
             rel = os.path.relpath(atual, raiz)
-            topo = rel.split(os.sep)[0]
-            if topo in PROTEGIDOS:
+            if rel.split(os.sep)[0] in PROTEGIDOS:
                 pastas[:] = []
                 continue
-            pastas[:] = [p for p in pastas if not (rel == "." and p in PROTEGIDOS)]
             for nome in arquivos:
                 if rel == "." and nome in PROTEGIDOS:
                     continue
                 de = os.path.join(atual, nome)
                 para = os.path.normpath(os.path.join(pasta, rel, nome))
-                if os.path.exists(para):
-                    if _ler(para) == _ler(de):
-                        continue
-                    bk = os.path.normpath(os.path.join(backup, rel, nome))
+                if os.path.exists(para) and _ler(para) == _ler(de):
+                    continue
+                bk = os.path.normpath(os.path.join(backup, rel, nome)) if os.path.exists(para) else None
+                trocas.append((de, para, bk))
+        # versao.py por último: se algo falhar no meio, a versão continua "velha" e tenta de novo depois
+        trocas.sort(key=lambda t: os.path.basename(t[1]) == "versao.py")
+        feitas = []
+        try:
+            for de, para, bk in trocas:  # 1) prepara tudo ao lado (.novo) e guarda o backup
+                os.makedirs(os.path.dirname(para), exist_ok=True)
+                shutil.copy2(de, para + ".novo")
+                if bk:
                     os.makedirs(os.path.dirname(bk), exist_ok=True)
                     shutil.copy2(para, bk)
-                os.makedirs(os.path.dirname(para), exist_ok=True)
-                tmp_para = para + ".novo"
-                shutil.copy2(de, tmp_para)
-                os.replace(tmp_para, para)  # troca atômica: nunca fica arquivo pela metade
+            for de, para, bk in trocas:  # 2) troca atômica arquivo por arquivo
+                os.replace(para + ".novo", para)
+                feitas.append((para, bk))
+        except Exception:
+            for para, bk in reversed(feitas):  # tudo ou nada: volta o que já tinha trocado
+                try:
+                    shutil.copy2(bk, para) if bk else os.remove(para)
+                except OSError:
+                    pass
+            for _, para, _ in trocas:
+                try:
+                    os.remove(para + ".novo")
+                except OSError:
+                    pass
+            raise
         if _ler(os.path.join(pasta, "requirements.txt")) != req_antes:
             avisar("Atualizando as bibliotecas...")
             instalar_dependencias(pasta)
@@ -148,6 +166,23 @@ def aplicar(info, pasta=PASTA, progresso=None):
         return info["versao"]
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def atualizar_git(pasta=PASTA):
+    """Pasta de desenvolvimento: se não tem nada em edição, faz 'git pull --ff-only'.
+    Devolve True se chegaram commits novos (aí o app reinicia)."""
+    def git(*a):
+        return subprocess.run(["git", "-C", pasta, *a], capture_output=True, text=True, timeout=120,
+                              creationflags=SEM_JANELA)
+    try:
+        if git("status", "--porcelain", "--untracked-files=no").stdout.strip():
+            return False  # tem alteração local: não mexe
+        antes = git("rev-parse", "HEAD").stdout.strip()
+        if git("pull", "--ff-only", "--quiet").returncode != 0:
+            return False
+        return git("rev-parse", "HEAD").stdout.strip() != antes
+    except Exception:
+        return False
 
 
 def instalar_dependencias(pasta=PASTA):

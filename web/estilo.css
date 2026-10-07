@@ -383,8 +383,9 @@ body.sem-footer .p-extra { padding-right: 0; }
   .lado-video { position: static; order: -1; }
   .estudio { grid-template-columns: 1fr; }
   .pagina, .busca-topo, .acoes, .musica-corpo, .heroi, .agora-topo, .agora-corpo { padding-left: 20px; padding-right: 20px; }
-  .player { grid-template-columns: 1fr auto; }
-  .p-centro { order: 3; grid-column: 1 / -1; display: none; }
+  .player { grid-template-columns: minmax(0, 1fr) auto auto; gap: 10px; }
+  .p-tempo { display: none; }
+  .p-botoes { gap: 6px; }
   .p-extra { padding-right: 0; }
   .p-sinc, #pPost { display: none; }
   .heroi-conteudo { flex-direction: column; align-items: flex-start; }

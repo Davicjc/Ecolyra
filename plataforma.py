@@ -255,6 +255,9 @@ class Handler(BaseHTTPRequestHandler):
         if rota == "tocar":  # a plataforma vai tocar esta música: já deixa a letra pronta para o overlay
             ctx["preparar_interno"](d)
             return {"ok": True}
+        if rota == "mostrar":  # o atalho foi aberto de novo: mostra o overlay/plataforma que já está rodando
+            ctx["mostrar"]()
+            return {"ok": True}
         if rota == "pagina/cmd":  # manda um comando para a janela da plataforma (ex.: tocar uma música)
             pagina["cmds"].append({"cmd": d.get("cmd"), "arg": d.get("arg")})
             return {"ok": True, "aberta": pagina_aberta()}
@@ -373,12 +376,26 @@ def trazer_para_frente():
         if u32.GetForegroundWindow() != h:
             u32.ShowWindow(h, 6)  # SW_MINIMIZE
         u32.ShowWindow(h, 9)  # SW_RESTORE
-        # o Windows só deixa roubar o foco se "uma tecla acabou de ser usada": um Alt solto libera
-        u32.keybd_event(0x12, 0, 0, 0)
-        u32.keybd_event(0x12, 0, 2, 0)
         u32.SetForegroundWindow(h)
         u32.BringWindowToTop(h)
     return bool(achadas)
+
+
+def chamar_aberto():
+    """Chamado por um 2º processo (atalho aberto de novo): avisa o Ecolyra que já está rodando."""
+    import re
+    import urllib.request
+    for porta in range(PORTA, PORTA + 20):
+        try:
+            html = urllib.request.urlopen(f"http://localhost:{porta}/", timeout=2).read().decode("utf-8")
+            token = re.search(r'"token": "([^"]+)"', html).group(1)
+            req = urllib.request.Request(f"http://localhost:{porta}/api/mostrar", data=b"{}", method="POST",
+                                         headers={"X-Token": token, "Content-Type": "application/json"})
+            urllib.request.urlopen(req, timeout=3)
+            return True
+        except Exception:
+            continue
+    return False
 
 
 def _esperar_e_trazer():
