@@ -1,0 +1,6 @@
+"""Versão do Ecolyra — a única fonte da verdade (o atualizador compara com a tag da release no GitHub)."""
+VERSAO = "2.0.0"
+REPO = "Davicjc/ecolyra"
+CRIADOR = "Davicjc"
+PORTFOLIO = "https://davicjc.github.io/PortfolioPessoal"
+FOOTER_JS = "https://footer.davicjc.com/projetos/footer-davi/footer_davicjc.js"

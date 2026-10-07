@@ -17,9 +17,7 @@ Atalhos (com o overlay em foco):
   Botão direito   menu com todas as opções
 """
 import asyncio
-import colorsys
 import ctypes
-import functools
 import hashlib
 import json
 import os
@@ -35,12 +33,19 @@ import tkinter.font as tkfont
 from io import BytesIO
 
 import requests
-from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps, ImageTk
+from PIL import Image, ImageOps, ImageTk
 from winrt.windows.media import MediaPlaybackAutoRepeatMode
 from winrt.windows.media.control import (
     GlobalSystemMediaTransportControlsSessionManager as SessionManager,
 )
 from winrt.windows.storage.streams import Buffer, InputStreamOptions
+
+import atualizador
+import plataforma
+from fontes import (LIXO, baixar_capa, buscar_letra, buscar_livre, buscar_lrclib, buscar_netease, candidatos,
+                    limpar_canal, limpar_titulo, lrclib_busca, metadados_limpos, normalizar, parse_lrc)
+from posts import capa_hd, copiar_imagem, gerar_imagem, pasta_imagens
+from versao import CRIADOR, PORTFOLIO, REPO, VERSAO
 
 APP = "Ecolyra"
 PASTA = os.path.dirname(os.path.abspath(__file__))
@@ -49,7 +54,6 @@ CACHE = os.path.join(PASTA, "cache")
 ICO = os.path.join(PASTA, "icone.ico")
 PNG = os.path.join(PASTA, "icone.png")
 INICIAR_LNK = os.path.join(os.environ["APPDATA"], r"Microsoft\Windows\Start Menu\Programs\Startup", APP + ".lnk")
-UA = {"User-Agent": "Ecolyra/3.0 (https://github.com/Davicjc/ecolyra)"}
 os.makedirs(CACHE, exist_ok=True)
 
 IDIOMAS = {"pt": "Português", "en": "English", "es": "Español", "fr": "Français",
@@ -105,6 +109,7 @@ APPS = [  # trecho do AppUserModelID → (nome, processo para o volume)
     ("deezer", "Deezer", "deezer.exe"), ("vlc", "VLC", "vlc.exe"),
     ("zunemusic", "Media Player", "Microsoft.Media.Player.exe"), ("tidal", "TIDAL", "tidal.exe"),
     ("amazon", "Amazon Music", "amazon music.exe"), ("applemusic", "Apple Music", "applemusic.exe"),
+    ("ecolyra.player", "Ecolyra", None),
 ]
 
 
@@ -195,6 +200,52 @@ async def executar(cmd, arg=None):
         await s.try_change_auto_repeat_mode_async(MediaPlaybackAutoRepeatMode(arg))
 
 
+# ---------------- Player interno (a plataforma do Ecolyra tocando o YouTube) ----------------
+# A página manda o estado do player a cada ~0,4 s; enquanto ela estiver tocando, ela é "o player"
+# (o overlay mostra a letra dela, os botões mandam comandos pra ela e a sessão do Edge é ignorada).
+INTERNO = "ecolyra.player"
+interno = {"ts": 0.0, "dados": {}, "cmds": [], "capa": None, "capa_url": "", "modo": "audio"}
+
+
+def interno_vivo():
+    return time.time() - interno["ts"] < 2.5
+
+
+def receber_interno(d):
+    interno["ts"] = time.time()
+    interno["dados"] = d
+    interno["modo"] = d.get("modo") or interno["modo"]
+    url = d.get("capa") or ""
+    if url and url != interno["capa_url"]:
+        interno["capa_url"] = url
+        threading.Thread(target=lambda: interno.update(capa=baixar_capa(url)), daemon=True).start()
+
+
+def ler_interno():
+    d = interno["dados"]
+    if not interno_vivo() or not d.get("titulo"):
+        return None
+    return {"titulo": d["titulo"], "artista": d.get("artista", ""), "app_id": INTERNO,
+            "duracao": float(d.get("duracao") or 0), "pos": float(d.get("pos") or 0), "atualizado": interno["ts"],
+            "tocando": bool(d.get("tocando")), "shuffle": False, "repeat": 0, "pode_shuffle": False,
+            "pode_repeat": False, "capa": interno["capa"], "video_titulo": d.get("video_titulo", "")}
+
+
+def preparar_interno(d):
+    """A plataforma vai tocar esta música: grava a letra que ela já achou no cache do overlay."""
+    interno["modo"] = d.get("modo") or "audio"
+    if not d.get("lrc") or not d.get("titulo"):
+        return
+    arq = arq_cache(d["titulo"], d.get("artista", ""))
+    try:
+        dados = json.load(open(arq, encoding="utf-8"))
+    except Exception:
+        dados = {}
+    if dados.get("lrc") != d["lrc"]:
+        dados = {"lrc": d["lrc"], "trad": {}, "quando": time.time(), "via": "plataforma"}
+        json.dump(dados, open(arq, "w", encoding="utf-8"), ensure_ascii=False)
+
+
 def loop_player():
     loop = asyncio.new_event_loop()
     capa_ate = 0.0
@@ -202,8 +253,18 @@ def loop_player():
     while True:
         try:
             while not comandos.empty():
-                loop.run_until_complete(executar(*comandos.get_nowait()))
+                c = comandos.get_nowait()
+                if estado["app_id"] == INTERNO and interno_vivo():
+                    interno["cmds"].append(c)  # a página do Ecolyra executa
+                else:
+                    loop.run_until_complete(executar(*c))
             r = loop.run_until_complete(ler_player(time.time() < capa_ate))
+            ri = ler_interno()
+            # o player interno manda enquanto toca; pausado, perde a vez se outro player começar a tocar
+            # (a sessão da própria janela do Ecolyra no Windows tem o mesmo título do vídeo → é ignorada)
+            if ri and (ri["tocando"] or not (r and r["tocando"] and
+                                            normalizar(r["titulo"] or "") != normalizar(ri["video_titulo"]))):
+                r = ri
             if r and r["titulo"]:
                 chave = (r["titulo"], r["artista"])
                 nome, _ = info_app(r["app_id"])
@@ -261,237 +322,7 @@ def volume_app(app_id):
 
 
 # ---------------- Busca de letra ----------------
-def parse_lrc(texto):
-    linhas = []
-    for l in texto.splitlines():
-        tags = re.findall(r"\[(\d+):(\d+(?:\.\d+)?)\]", l)
-        frase = re.sub(r"\[.*?\]", "", l).strip()
-        for m, s in tags:
-            linhas.append([int(m) * 60 + float(s), frase])
-    return sorted(linhas, key=lambda x: x[0])
-
-
-def limpar_titulo(titulo):
-    """Tira '(feat. X)', '- Remastered', '[Explicit]' etc."""
-    t = re.sub(r"\s*[\(\[][^\)\]]*(feat|ft\.|with|remaster|explicit|version|live|from)[^\)\]]*[\)\]]", "", titulo, flags=re.I)
-    t = re.sub(r"\s+-\s+.*(remaster|version|live|edit|mix).*$", "", t, flags=re.I)
-    return t.strip() or titulo
-
-
-def normalizar(s):
-    return re.sub(r"[^a-z0-9]", "", s.lower())
-
-
-# --- títulos de vídeo (YouTube etc.): "Artista - Música (Official Video) [4K]" ---
-LIXO = (r"official|oficial|video|vídeo|clipe|clip\b|audio|áudio|lyric|letra|legendad|tradu[cç]|visuali[sz]er|"
-        r"\bm/?v\b|\bhd\b|\bhq\b|\b4k\b|1080p|remaster|explicit|ao vivo|prod\.|color coded|sub\s*esp|\bpt-?br\b|"
-        r"animation|animated|anima[cç][aã]o|\bamv\b|\bpmv\b|visualizer|\bsped up\b|\bslowed\b|nightcore")
-
-
-def tirar_feat(s):
-    return re.sub(r"\s*[\(\[]?\b(ft|feat|featuring)\b\.?\s.*$", "", s, flags=re.I).strip()
-
-
-def limpar_video(t):
-    t = re.sub(r"[\(\[【][^\)\]】]*[\)\]】]", lambda m: "" if re.search(LIXO, m.group(0), re.I) else m.group(0), t)
-    t = re.sub(r"\s+(official|oficial)\b.*$", "", t, flags=re.I)
-    t = re.sub(r"#\S+", "", t)
-    return re.sub(r"\s{2,}", " ", t).strip(" -–—|/")
-
-
-def limpar_canal(a):
-    a = (a or "").strip()
-    sem = re.sub(r"(vevo|\s*-\s*topic|\s+official|\s+oficial|\s+music|\s+tv)$", "", a, flags=re.I).strip()
-    if sem != a and " " not in sem:  # "ImagineDragonsVEVO" → "Imagine Dragons"
-        sem = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", sem)
-    return sem
-
-
-def candidatos(titulo, artista, app_id=""):
-    """(música, artista) a tentar, do mais provável pro menos."""
-    if "spotify" in (app_id or "spotify").lower():
-        return [(titulo, artista)]  # o Spotify já manda certinho
-    t, a = limpar_video(titulo), limpar_canal(artista)
-    c = []
-    # pedaços que são só lixo ("Lyrics", "Official Video") saem
-    partes = [p for p in re.split(r"\s+[-–—~]\s+|\s*[|｜]\s*", t)
-              if re.sub(LIXO, "", p, flags=re.I).strip(" -|/()[]")]
-    if len(partes) >= 2:
-        e, d = (p.strip(" \"'“”‘’") for p in partes[:2])
-        par = [(tirar_feat(d), tirar_feat(e)), (tirar_feat(e), tirar_feat(d))]
-        if a and normalizar(a) and normalizar(a) in normalizar(d) and normalizar(a) not in normalizar(e):
-            par.reverse()  # "Música - Artista"
-        c += par
-    q = re.match(r"^(.+?)\s+[\"“'‘「『](.+?)[\"”'’」』]", t)  # BTS 'Dynamite' MV
-    if q:
-        c.append((q.group(2).strip(), q.group(1).strip()))
-    c.append((tirar_feat(t), a))
-    # variações: sem nada entre colchetes/parênteses e só com o 1º artista ("CG5 × Pomni" → "CG5")
-    extra = []
-    for m, art in c:
-        m2 = re.sub(r"\s*[\(\[【][^\)\]】]*[\)\]】]", "", m).strip()
-        a2 = re.split(r"\s*(?:[×,&]|\bx\b|\band\b|\bwith\b|\be\b|\by\b)\s*", art, maxsplit=1, flags=re.I)[0].strip()
-        extra += [(m2, art), (m2, a2), (m, a2)]
-    c += extra
-    vistos, saida = set(), []
-    for m, art in c:
-        k = (normalizar(m), normalizar(art))
-        if m and k[0] and k not in vistos:
-            vistos.add(k)
-            saida.append((m, art))
-    return saida
-
-
-def buscar_livre(titulo, artista, dur):
-    """Pesquisa o título do vídeo inteiro (sem colchetes) e só aceita resultado cujo nome da
-    música E algum artista aparecem no título do vídeo / nome do canal — pega qualquer formato."""
-    sem_parenteses = limpar_video(re.sub(r"[\(\[【「『][^\)\]】」』]*[\)\]】」』]", " ", titulo))
-    # a busca do LRCLIB exige todas as palavras → tenta o título todo e cada pedaço sozinho
-    pedacos = [p.strip(" \"'“”‘’") for p in re.split(r"\s+[-–—~]\s+|\s*[|｜]\s*|\s+[×x]\s+", sem_parenteses)]
-    buscas = [re.sub(r"\s*(?:[×|｜~–—-]|\bx\b)\s*", " ", sem_parenteses)]
-    buscas += sorted({p for p in pedacos if len(normalizar(p)) >= 3} - set(buscas), key=len, reverse=True)[:3]
-    texto_tit = normalizar(titulo)
-    texto_tudo = normalizar(f"{titulo} {artista} {limpar_canal(artista)}")
-    for q in buscas:
-        achado = _livre_melhor(lrclib_busca({"q": q}), texto_tit, texto_tudo, dur)
-        if achado:
-            return achado
-    return None
-
-
-def _livre_melhor(itens, texto_tit, texto_tudo, dur):
-    bons = []
-    for i in itens:
-        if not i.get("syncedLyrics"):
-            continue
-        nome = normalizar(limpar_titulo(i.get("trackName", "")))
-        if len(nome) < 3 or nome not in texto_tit:
-            continue
-        artistas = [normalizar(x) for x in re.split(r",|&|×|\bx\b|feat\.?|ft\.?", i.get("artistName", ""), flags=re.I)]
-        if not any(len(x) >= 2 and x in texto_tudo for x in artistas):
-            continue
-        diff = abs((i.get("duration") or 0) - dur) if dur else 0
-        if dur and diff > 60:
-            continue
-        bons.append((-len(nome), diff, i["syncedLyrics"]))  # nome mais completo, depois duração mais perto
-    return min(bons)[2] if bons else None
-
-
-def parecido(alvo, nome, estrito):
-    if not alvo or not nome:
-        return not alvo
-    if alvo == nome:
-        return True
-    if alvo in nome or nome in alvo:
-        return not estrito or min(len(alvo), len(nome)) / max(len(alvo), len(nome)) >= 0.5
-    return False
-
-
-def melhor_candidato(itens, titulo, dur, tol=8, estrito=False):
-    """Escolhe o resultado sincronizado com título parecido e duração mais próxima."""
-    alvo = normalizar(limpar_titulo(titulo))
-    bons = []
-    for i in itens:
-        if not i.get("syncedLyrics"):
-            continue
-        if not parecido(alvo, normalizar(limpar_titulo(i.get("trackName", ""))), estrito):
-            continue
-        diff = abs((i.get("duration") or 0) - dur) if dur else 0
-        if dur and diff > tol:
-            continue
-        bons.append((diff, i["syncedLyrics"]))
-    return min(bons)[1] if bons else None
-
-
-def lrclib_busca(params):
-    try:
-        r = requests.get("https://lrclib.net/api/search", headers=UA, timeout=10, params=params)
-        return r.json() if r.ok else []
-    except Exception:
-        return []
-
-
-def buscar_lrclib(titulo, artista, dur, tol=8, estrito=False, so_titulo=True):
-    limpo = limpar_titulo(titulo)
-    if artista and tol <= 8:
-        try:
-            r = requests.get("https://lrclib.net/api/get", headers=UA, timeout=10,
-                             params={"track_name": titulo, "artist_name": artista, "duration": round(dur)})
-            if r.ok and r.json().get("syncedLyrics"):
-                return r.json()["syncedLyrics"]
-        except Exception:
-            pass
-    # 1) título + artista  2) só o título (Spotify às vezes manda só o 1º cantor)
-    #    3) busca livre com título + artista
-    buscas = []
-    if artista:
-        buscas.append({"track_name": limpo, "artist_name": artista})
-    if so_titulo:
-        buscas.append({"track_name": limpo})
-    if artista:
-        buscas.append({"q": f"{limpo} {artista}"})
-    for params in buscas:
-        achado = melhor_candidato(lrclib_busca(params), titulo, dur, tol, estrito)
-        if achado:
-            return achado
-    return None
-
-
-def buscar_netease(titulo, artista, dur, tol=8, estrito=False):
-    """Segunda fonte: NetEase Cloud Music (catálogo enorme, inclusive ocidental)."""
-    limpo = limpar_titulo(titulo)
-    cab = {"User-Agent": "Mozilla/5.0", "Referer": "https://music.163.com"}
-    try:
-        r = requests.post("https://music.163.com/api/search/get", timeout=10, headers=cab,
-                          data={"s": f"{limpo} {artista}".strip(), "type": 1, "limit": 15})
-        musicas = r.json().get("result", {}).get("songs", []) or []
-    except Exception:
-        return None
-    alvo = normalizar(limpo)
-    achados = []
-    for m in musicas:
-        if not parecido(alvo, normalizar(limpar_titulo(m.get("name", ""))), estrito):
-            continue
-        diff = abs(m.get("duration", 0) / 1000 - dur) if dur else 0
-        if dur and diff > tol:
-            continue
-        achados.append((diff, m["id"]))
-    for _, mid in sorted(achados)[:3]:
-        try:
-            l = requests.get("https://music.163.com/api/song/lyric", timeout=10, headers=cab,
-                             params={"id": mid, "lv": 1}).json()
-            lrc = (l.get("lrc") or {}).get("lyric", "")
-            if len(re.findall(r"\[\d+:\d+", lrc)) > 5:
-                # remove créditos tipo "作词 : ..." do começo
-                return "\n".join(x for x in lrc.splitlines() if not re.search(r"[一-鿿]\s*[:：]", x))
-        except Exception:
-            continue
-    return None
-
-
-def buscar_letra(titulo, artista, dur, app_id=""):
-    if "spotify" in (app_id or "spotify").lower():
-        return buscar_lrclib(titulo, artista, dur) or buscar_netease(titulo, artista, dur)
-    # vídeo: clipe tem intro/final, então a duração bate menos; o título precisa bater mais
-    achado = buscar_livre(titulo, artista, dur)
-    if achado:
-        return achado
-    cands = candidatos(titulo, artista, app_id)
-    for m, a in cands:
-        if a:
-            achado = buscar_lrclib(m, a, dur, 60, True, so_titulo=False)
-            if achado:
-                return achado
-    for m, a in cands:
-        if a:
-            achado = buscar_netease(m, a, dur, 60, True)
-            if achado:
-                return achado
-    for m, _ in cands:  # último recurso: só o título, com a duração mais rígida
-        achado = buscar_lrclib(m, "", dur, 15, True)
-        if achado:
-            return achado
-    return None
+# (busca de letra: fontes.py)
 
 
 # ---------------- Sincronia pelo áudio ----------------
@@ -641,6 +472,8 @@ def sinc_ligada():
     modo = cfg.get("sinc_audio", "videos")
     if modo == "off" or not os.path.exists(os.path.join(PASTA, "ouvinte.py")):
         return False
+    if estado["app_id"] == INTERNO:  # player interno: só escuta quando é o clipe (a versão de áudio já bate)
+        return interno["modo"] == "clipe"
     return modo == "sempre" or "spotify" not in (estado["app_id"] or "").lower()
 
 
@@ -687,7 +520,7 @@ def buscar_por_id(titulo, artista, dur):
 
 def precisa_trocar_letra(sz):
     """O Shazam reconheceu outra música que não a do título do vídeo (ou não tinha letra)?"""
-    if letra.get("via") in ("shazam", "audio"):  # já foi escolhida pelo áudio
+    if letra.get("via") in ("shazam", "audio", "plataforma"):  # já foi escolhida pelo áudio / pela plataforma
         return False
     if not letra["linhas"]:
         return letra["status"].startswith("Sem letra")
@@ -1030,202 +863,135 @@ def traduzir_letra(chave, dados=None, arq=None):
         letra["status"] = ""
 
 
-# ---------------- Imagem para postar ----------------
-FORMATOS = {  # nome: (largura, altura, margem de segurança topo, base, tamanho inicial da letra)
-    "Stories": (1080, 1920, 230, 300, 64),
-    "Feed": (1080, 1350, 80, 80, 58),
-    "Quadrado": (1080, 1080, 60, 60, 52),
-}
-FONTES_WIN = r"C:\Windows\Fonts"
+# (imagem/vídeo para postar: posts.py)
 
 
-@functools.lru_cache(maxsize=64)
-def fonte(peso, tam, escrita="latin"):
-    arqs = {"latin": {"b": "segoeuib.ttf", "s": "seguisb.ttf", "r": "segoeui.ttf"},
-            "ja": {"b": "YuGothB.ttc", "s": "YuGothB.ttc", "r": "YuGothR.ttc"},
-            "ko": {"b": "malgunbd.ttf", "s": "malgunbd.ttf", "r": "malgun.ttf"}}
+# ---------------- Sincronia manual (overlay e plataforma) ----------------
+def chave_musica():
+    return f"{estado['titulo']}|{estado['artista']}"
+
+
+def offset_manual():
+    return cfg["offsets"].get(chave_musica(), 0.0)
+
+
+def offset_total():
+    return offset_manual() + (letra.get("auto") or 0.0)
+
+
+def ajustar_offset(d):
+    k = chave_musica()
+    novo = 0.0 if d is None else round(offset_manual() + d, 2)
+    if novo:
+        cfg["offsets"][k] = novo
+    else:
+        cfg["offsets"].pop(k, None)
+    salvar_cfg()
+
+
+def esperando_sincronia():
+    """Só mostra a letra andando depois que o áudio confirmou o tempo. Exceções: você mesmo
+    ajustou (+/-) ou o ouvinte está falhando — aí mostra do jeito que der."""
+    return sinc_ligada() and letra.get("auto") is None and not offset_manual() and ouvinte["falhas"] < 3
+
+
+# ---------------- Ponte com a plataforma (web/) ----------------
+def versao_letra():
+    return hashlib.md5(repr((letra["chave"], len(letra["linhas"]), len(letra["trad"]), letra["status"])).encode()).hexdigest()[:10]
+
+
+def estado_web():
+    with lock:
+        e = {k: estado[k] for k in ("titulo", "artista", "duracao", "tocando", "ativo", "fonte", "app_id", "capa_v",
+                                    "shuffle", "repeat", "pode_shuffle", "pode_repeat", "sem_tempo")}
+    e.update(pos=posicao_atual(), offset=offset_total(), auto=letra.get("auto"), manual=offset_manual(),
+             letra_v=versao_letra(), status=letra["status"], esperando=bool(letra["linhas"]) and esperando_sincronia(),
+             interno=e["app_id"] == INTERNO, modo=cfg.get("modo", "flutuante"))
+    return e
+
+
+def letra_web():
+    return {"chave": letra["chave"], "linhas": letra["linhas"], "trad": letra["trad"], "status": letra["status"],
+            "v": versao_letra()}
+
+
+def cmds_interno():
+    saida, interno["cmds"] = interno["cmds"], []
+    return [{"cmd": c[0], "arg": c[1] if len(c) > 1 else None} for c in saida]
+
+
+CFG_WEB = {"idioma", "modo", "atualizar_auto", "sinc_audio", "original", "proxima", "fonte"}
+
+
+def config_web():
+    return {k: cfg.get(k) for k in CFG_WEB} | {"atualizar_auto": cfg.get("atualizar_auto", True),
+                                               "modo": cfg.get("modo", "flutuante"),
+                                               "sinc_audio": cfg.get("sinc_audio", "videos"),
+                                               "iniciar_windows": os.path.exists(INICIAR_LNK)}
+
+
+def set_config_web(k, v):
+    if k in CFG_WEB or k == "iniciar_windows":
+        ui_fila.put(("cfg", k, v))  # a interface aplica (mudar idioma retraduz, modo mostra/esconde o overlay...)
+
+
+# ---------------- Atualização automática ----------------
+upd = {"estado": "", "msg": "", "versao_nova": "", "notas": "", "verificado_em": 0}
+
+
+def checar_update(aplicar=True):
+    if upd["estado"] in ("verificando", "baixando"):
+        return
+    upd.update(estado="verificando", msg="Verificando...")
     try:
-        return ImageFont.truetype(os.path.join(FONTES_WIN, arqs[escrita][peso]), tam)
-    except OSError:
-        return ImageFont.truetype(os.path.join(FONTES_WIN, arqs["latin"][peso]), tam)
-
-
-def fonte_para(texto, peso, tam):
-    if re.search(r"[\u3040-\u30ff\u4e00-\u9fff]", texto):
-        return fonte(peso, tam, "ja")
-    if re.search(r"[\uac00-\ud7af]", texto):
-        return fonte(peso, tam, "ko")
-    return fonte(peso, tam)
-
-
-def quebrar(texto, f, largura):
-    linhas, atual = [], ""
-    for p in texto.split():
-        teste = f"{atual} {p}".strip()
-        if atual and f.getlength(teste) > largura:
-            linhas.append(atual)
-            atual = p
-        else:
-            atual = teste
-    return linhas + [atual] if atual else linhas
-
-
-def capa_hd(titulo, artista):
-    """Capa em alta (1200 px) pelo iTunes; fica em cache. None se não achar com segurança."""
-    arq = os.path.join(CACHE, "capa_" + hashlib.md5(f"{titulo}|{artista}".encode()).hexdigest() + ".jpg")
-    if os.path.exists(arq):
-        return open(arq, "rb").read()
-    alvo = normalizar(limpar_titulo(titulo))
-    for termo in (f"{limpar_titulo(titulo)} {artista}", limpar_titulo(titulo)):
+        info = atualizador.verificar()
+    except Exception as e:
+        upd.update(estado="erro", msg=f"Não consegui verificar ({e})")
+        return
+    upd["verificado_em"] = time.time()
+    if not info:
+        upd.update(estado="ok", msg=f"Você está na versão mais nova ({VERSAO})")
+        return
+    upd.update(estado="disponivel", versao_nova=info["versao"], notas=info["notas"],
+               msg=f"Versão {info['versao']} disponível")
+    if atualizador.modo_dev():
+        upd.update(estado="dev", msg=f"Versão {info['versao']} no GitHub — pasta de desenvolvimento, atualize pelo git")
+        return
+    if aplicar:
+        upd.update(estado="baixando")
         try:
-            r = requests.get("https://itunes.apple.com/search", timeout=8,
-                             params={"term": termo, "entity": "song", "limit": 15})
-            for i in r.json().get("results", []):
-                nome = normalizar(limpar_titulo(i.get("trackName", "")))
-                if alvo and (alvo in nome or nome in alvo) and i.get("artworkUrl100"):
-                    img = requests.get(i["artworkUrl100"].replace("100x100bb", "1200x1200bb"), timeout=10)
-                    if img.ok:
-                        open(arq, "wb").write(img.content)
-                        return img.content
-        except Exception:
-            continue
-    return None
+            atualizador.aplicar(info, progresso=lambda t: upd.update(msg=t))
+        except Exception as e:
+            upd.update(estado="erro", msg=f"Falhou ao atualizar: {e}")
+            return
+        upd.update(estado="instalado", msg=f"Versão {info['versao']} instalada — reiniciando...")
+        ui_fila.put(("reiniciar",))
 
 
-def cor_destaque(img):
-    r, g, b = img.resize((1, 1), Image.LANCZOS).getpixel((0, 0))[:3]
-    h, s, v = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
-    r, g, b = colorsys.hsv_to_rgb(h, max(s, 0.45), max(v, 0.9))
-    return int(r * 255), int(g * 255), int(b * 255)
+def loop_atualizacao():
+    time.sleep(20)
+    while True:
+        if cfg.get("atualizar_auto", True):
+            checar_update(True)
+        time.sleep(6 * 3600)
 
 
-def gerar_imagem(capa, titulo, artista, pares, formato, original_destaque=False):
-    """pares = [(tradução, original), ...] → Image RGB no formato pedido."""
-    W, H, seg_topo, seg_base, tam0 = FORMATOS[formato]
-    try:
-        arte = Image.open(BytesIO(capa)).convert("RGB")
-    except Exception:
-        arte = Image.open(PNG).convert("RGB")
-
-    # fundo: capa ampliada, bem desfocada e escurecida
-    fundo = ImageOps.fit(arte, (W // 3, H // 3), Image.LANCZOS).filter(ImageFilter.GaussianBlur(7))
-    fundo = fundo.resize((W, H), Image.BICUBIC)
-    fundo = ImageEnhance.Color(fundo).enhance(1.3)
-    fundo = ImageEnhance.Brightness(fundo).enhance(0.9).convert("RGBA")
-    grad = Image.linear_gradient("L").resize((W, H)).point(lambda v: 10 + v * 80 // 255)
-    sombra = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    sombra.putalpha(grad)
-    fundo.alpha_composite(sombra)
-
-    m, p = 64, 56                 # margem do cartão e respiro interno
-    cw = W - 2 * m
-    tl = cw - 2 * p               # largura útil do texto
-    acento = cor_destaque(arte)
-
-    # cabeçalho: capa + nome da música + artista
-    tc = 136
-    f_tit = fonte_para(titulo, "b", 46)
-    f_art = fonte_para(artista, "r", 34)
-    tit_l = quebrar(titulo, f_tit, tl - tc - 30)
-    if len(tit_l) > 2:
-        tit_l = tit_l[:2]
-        while f_tit.getlength(tit_l[1] + "…") > tl - tc - 30 and len(tit_l[1]) > 1:
-            tit_l[1] = tit_l[1][:-1]
-        tit_l[1] += "…"
-    alt_cab = max(tc, len(tit_l) * 56 + 46)
-
-    # letra: diminui a fonte até caber
-    limite = H - seg_topo - seg_base - 2 * p - alt_cab - 56
-    for tam in range(tam0, 25, -2):
-        tam_sub = round(tam * 0.64)
-        blocos, total = [], 0
-        for trad, orig in pares:
-            grande, pequeno = (orig, trad) if original_destaque else (trad or orig, orig)
-            if not pequeno or normalizar(pequeno) == normalizar(grande):
-                pequeno = ""
-            fg = fonte_para(grande, "b", tam)
-            fp = fonte_para(pequeno, "r", tam_sub)
-            lg = quebrar(grande, fg, tl)
-            lp = quebrar(pequeno, fp, tl) if pequeno else []
-            h = len(lg) * round(tam * 1.22) + (8 + len(lp) * round(tam_sub * 1.3) if lp else 0)
-            blocos.append((fg, lg, fp, lp, h))
-            total += h
-        total += round(tam * 0.85) * (len(blocos) - 1)
-        if total <= limite:
-            break
-
-    ch = p + alt_cab + 56 + total + p
-    cx, cy = m, seg_topo + max(0, (H - seg_topo - seg_base - ch) // 2)
-
-    # cartão de vidro fosco
-    mascara = Image.new("L", (W, H), 0)
-    ImageDraw.Draw(mascara).rounded_rectangle((cx, cy, cx + cw, cy + ch), 44, fill=255)
-    vidro = ImageEnhance.Brightness(fundo.filter(ImageFilter.GaussianBlur(28))).enhance(0.6)
-    fundo.paste(vidro, (0, 0), mascara)
-    camada = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    d = ImageDraw.Draw(camada)
-    d.rounded_rectangle((cx, cy, cx + cw, cy + ch), 44, fill=(255, 255, 255, 14), outline=(255, 255, 255, 60), width=2)
-
-    # capa pequena com cantos arredondados
-    mini = ImageOps.fit(arte, (tc, tc), Image.LANCZOS)
-    mm = Image.new("L", (tc, tc), 0)
-    ImageDraw.Draw(mm).rounded_rectangle((0, 0, tc, tc), 20, fill=255)
-    fundo.paste(mini, (cx + p, cy + p), mm)
-    tx = cx + p + tc + 30
-    ty = cy + p + (alt_cab - (len(tit_l) * 56 + 46)) // 2
-    for l in tit_l:
-        d.text((tx, ty), l, font=f_tit, fill=(255, 255, 255, 255))
-        ty += 56
-    d.text((tx, ty + 2), artista, font=f_art, fill=(255, 255, 255, 175))
-
-    # linha de destaque na cor da capa
-    y = cy + p + alt_cab + 26
-    d.rounded_rectangle((cx + p, y, cx + p + 90, y + 5), 3, fill=acento + (255,))
-    y += 30
-
-    for i, (fg, lg, fp, lp, h) in enumerate(blocos):
-        for l in lg:
-            d.text((cx + p, y), l, font=fg, fill=(255, 255, 255, 255))
-            y += round(tam * 1.22)
-        if lp:
-            y += 8
-            for l in lp:
-                d.text((cx + p, y), l, font=fp, fill=(255, 255, 255, 165))
-                y += round(tam_sub * 1.3)
-        y += round(tam * 0.85)
-
-    fundo.alpha_composite(camada)
-    return fundo.convert("RGB")
+def atualizar_web(acao):
+    if acao in ("verificar", "aplicar"):
+        threading.Thread(target=checar_update, args=(acao == "aplicar" or cfg.get("atualizar_auto", True),),
+                         daemon=True).start()
+        time.sleep(0.3)
+    return dict(upd, versao=VERSAO)
 
 
-def pasta_imagens():
-    buf = ctypes.create_unicode_buffer(260)
-    ctypes.windll.shell32.SHGetFolderPathW(None, 0x27, None, 0, buf)  # Minhas imagens
-    pasta = os.path.join(buf.value or os.path.expanduser("~\\Pictures"), APP)
-    os.makedirs(pasta, exist_ok=True)
-    return pasta
-
-
-def copiar_imagem(img):
-    """Coloca a imagem na área de transferência (cola direto no WhatsApp, Instagram web etc.)."""
-    bmp = BytesIO()
-    img.convert("RGB").save(bmp, "BMP")
-    dados = bmp.getvalue()[14:]
-    k32, u32 = ctypes.WinDLL("kernel32"), ctypes.WinDLL("user32")
-    k32.GlobalAlloc.restype = k32.GlobalLock.restype = ctypes.c_void_p
-    k32.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
-    k32.GlobalLock.argtypes = k32.GlobalUnlock.argtypes = [ctypes.c_void_p]
-    u32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
-    u32.SetClipboardData.restype = ctypes.c_void_p
-    h = k32.GlobalAlloc(0x0002, len(dados))
-    ctypes.memmove(k32.GlobalLock(h), dados, len(dados))
-    k32.GlobalUnlock(h)
-    if not u32.OpenClipboard(None):
-        return False
-    u32.EmptyClipboard()
-    u32.SetClipboardData(8, h)  # CF_DIB
-    u32.CloseClipboard()
-    return True
+def iniciar_plataforma():
+    plataforma.iniciar({
+        "agora": estado_web, "letra_agora": letra_web, "capa_agora": lambda: estado["capa"],
+        "player_interno": receber_interno, "cmds_interno": cmds_interno, "preparar_interno": preparar_interno,
+        "comando": lambda c, a=None: comandos.put((c,) if a is None else (c, a)), "ajustar": ajustar_offset,
+        "traduzir": lambda frases, idioma: traduzir(frases, idioma), "config": config_web,
+        "set_config": set_config_web, "status_update": lambda: dict(upd), "atualizar": atualizar_web,
+    })
 
 
 # ---------------- Interface ----------------
@@ -1243,7 +1009,8 @@ G = {"anterior": "", "proxima": "", "play": "", "pause": "",
      "pin": "", "unpin": "",
      "globo": "\ue774", "original": "\ue8c1", "proxima_l": "\ue8fd", "tamanho": "\ue8e9",
      "largura": "\ue740", "opac": "\ue706", "ouvir": "\ue720", "fonte": "\ue8d6", "camera": "\ue722",
-     "copiar": "\ue8c8", "buscar": "\ue72c", "olho": "\ue7b3", "ligar": "\ue7e8"}
+     "copiar": "\ue8c8", "buscar": "\ue72c", "olho": "\ue7b3", "ligar": "\ue7e8",
+     "pesquisa": "\ue721", "app": "\ue8a7"}
 
 
 def mmss(s):
@@ -1478,6 +1245,8 @@ class App:
              lambda: sinc.get(cfg.get("sinc_audio", "videos"), "Vídeos"), lambda: cfg.get("sinc_audio", "videos") != "off")
         item(esq, G["fonte"], menu(self.m_fonte), "De onde vem a música (automático ou um player fixo)",
              lambda: (info_app(cfg["fonte_fixa"])[0] if cfg.get("fonte_fixa") else f"Auto · {estado['fonte'] or '—'}"))
+        item(dir_, G["pesquisa"], lambda w: self.pesquisar(), "Pesquisar música por link ou nome (P)")
+        item(dir_, G["app"], lambda w: self.abrir_plataforma("/agora"), "Abrir a plataforma Ecolyra (aba única)")
         item(dir_, G["camera"], lambda w: self.imagem_da_linha_atual(), "Criar imagem para postar (I)")
         item(dir_, G["copiar"], lambda w: self.copiar(), "Copiar a tradução atual")
         item(dir_, G["buscar"], lambda w: self.recarregar(), "Buscar a letra de novo")
@@ -1486,6 +1255,13 @@ class App:
              ativo=lambda: cfg["auto_esconder"])
         item(dir_, G["ligar"], lambda w: (self.v_inicio.set(not self.v_inicio.get()), self.alternar_inicio()),
              "Iniciar com o Windows", ativo=lambda: self.v_inicio.get())
+        sep(dir_)
+        cred = tk.Label(dir_, text=f"by {CRIADOR.lower()}", font=("Cascadia Code", 8), bg=BG2, fg=APAGADO, cursor="hand2")
+        cred.pack(side="left", padx=(2, 4))
+        cred.bind("<Enter>", lambda e: cred.config(fg=BRANCO))
+        cred.bind("<Leave>", lambda e: cred.config(fg=APAGADO))
+        cred.bind("<Button-1>", lambda e: self.sobre())
+        Dica(cred, f"Ecolyra {VERSAO} — criado por {CRIADOR}. Clique para ver mais")
 
     def atualizar_opcoes(self):
         for ic, tx, texto, ativo in self.itens_op:
@@ -1574,11 +1350,27 @@ class App:
         self.m_fonte = tk.Menu(m, tearoff=0, postcommand=self.montar_menu_fonte)
         m.add_cascade(label="Fonte da música", menu=self.m_fonte)
         m.add_command(label="Letra completa\tL", command=self.abrir_letra_completa)
+        m.insert_command(0, label="Pesquisar música (link ou nome)...\tP", command=self.pesquisar)
+        m.insert_command(1, label="Abrir a plataforma Ecolyra", command=lambda: self.abrir_plataforma("/agora"))
+        sub_modo = tk.Menu(m, tearoff=0)
+        self.v_modo = tk.StringVar(value=cfg.get("modo", "flutuante"))
+        sub_modo.add_radiobutton(label="Telas flutuantes (overlay)", value="flutuante", variable=self.v_modo,
+                                 command=lambda: self.mudar_modo("flutuante"))
+        sub_modo.add_radiobutton(label="Aba única (plataforma)", value="plataforma", variable=self.v_modo,
+                                 command=lambda: self.mudar_modo("plataforma"))
+        m.insert_cascade(2, label="Modo de exibição", menu=sub_modo)
+        m.insert_separator(3)
         m.add_command(label="Criar imagem para postar\tI", command=self.imagem_da_linha_atual)
         m.add_command(label="Copiar tradução atual", command=self.copiar)
         m.add_command(label="Buscar a letra de novo", command=self.recarregar)
         m.add_separator()
         m.add_checkbutton(label="Iniciar com o Windows", variable=self.v_inicio, command=self.alternar_inicio)
+        self.v_auto_upd = tk.BooleanVar(value=cfg.get("atualizar_auto", True))
+        m.add_checkbutton(label="Atualizar automaticamente", variable=self.v_auto_upd,
+                          command=lambda: self.set_cfg("atualizar_auto", self.v_auto_upd.get()))
+        m.add_command(label="Verificar atualizações",
+                      command=lambda: threading.Thread(target=checar_update, daemon=True).start())
+        m.add_command(label=f"Sobre o Ecolyra (by {CRIADOR})", command=self.sobre)
         m.add_command(label="Esconder na bandeja\tEsc", command=self.esconder)
         m.add_command(label="Fechar", command=self.sair)
 
@@ -1621,6 +1413,7 @@ class App:
         r.bind("o", lambda e: (self.v_orig.set(not self.v_orig.get()), self.set_cfg("original", self.v_orig.get())))
         r.bind("l", lambda e: self.abrir_letra_completa())
         r.bind("i", lambda e: self.imagem_da_linha_atual())
+        r.bind("p", lambda e: self.pesquisar())
         r.bind("<Escape>", lambda e: self.esconder())
         r.bind("<Button-3>", self.abrir_menu)
 
@@ -1693,29 +1486,115 @@ class App:
         if geometria:
             self.aplicar_geometria()
 
-    def chave_musica(self):
-        return f"{estado['titulo']}|{estado['artista']}"
-
     def offset_manual(self):
-        return cfg["offsets"].get(self.chave_musica(), 0.0)
+        return offset_manual()
 
     def offset(self):
-        return self.offset_manual() + (letra.get("auto") or 0.0)
+        return offset_total()
 
     def ajustar(self, d):
-        k = self.chave_musica()
-        novo = 0.0 if d is None else round(self.offset_manual() + d, 2)
-        if novo:
-            cfg["offsets"][k] = novo
-        else:
-            cfg["offsets"].pop(k, None)
-        salvar_cfg()
+        ajustar_offset(d)
 
     def esperando_sincronia(self):
-        """Só mostra a letra andando depois que o áudio confirmou o tempo. Exceções: você mesmo
-        ajustou (+/-) ou o ouvinte está falhando — aí mostra do jeito que der."""
-        return (sinc_ligada() and letra.get("auto") is None and not self.offset_manual()
-                and ouvinte["falhas"] < 3)
+        return esperando_sincronia()
+
+    # ---------- plataforma / modo / sobre ----------
+    def abrir_plataforma(self, rota=""):
+        plataforma.abrir(rota)
+
+    def pesquisar(self):
+        """Campo de busca (link ou nome): no modo flutuante abre numa janelinha compacta."""
+        plataforma.abrir("/buscar", compacta=cfg.get("modo", "flutuante") == "flutuante")
+
+    def mudar_modo(self, modo):
+        cfg["modo"] = modo
+        salvar_cfg()
+        self.v_modo.set(modo)
+        if modo == "plataforma":
+            self.esconder()
+            plataforma.abrir("/agora")
+        else:
+            self.mostrar()
+
+    def sobre(self):
+        j = tk.Toplevel(self.root)
+        j.title(f"Sobre — {APP}")
+        j.configure(bg=BG)
+        j.attributes("-topmost", True)
+        j.resizable(False, False)
+        self.img_sobre = ImageTk.PhotoImage(Image.open(PNG).resize((72, 72), Image.LANCZOS))
+        tk.Label(j, image=self.img_sobre, bg=BG).pack(pady=(22, 6))
+        tk.Label(j, text=APP, bg=BG, fg=BRANCO, font=("Segoe UI Semibold", 18)).pack()
+        tk.Label(j, text=f"versão {VERSAO}", bg=BG, fg=APAGADO, font=("Segoe UI", 9)).pack()
+        tk.Label(j, text="Letras traduzidas em tempo real, busca por link ou nome,\nvídeos e posts com a música de fundo.",
+                 bg=BG, fg=CINZA, font=("Segoe UI", 10), justify="center").pack(pady=(10, 14), padx=30)
+
+        def link(texto, url, destaque=False):
+            b = tk.Label(j, text=texto, bg=VERDE if destaque else "#2a2a2a", fg="#000000" if destaque else BRANCO,
+                         font=("Segoe UI Semibold", 10), padx=14, pady=7, cursor="hand2")
+            b.pack(fill="x", padx=40, pady=3)
+            b.bind("<Button-1>", lambda e: os.startfile(url))
+        link(f"Criado por {CRIADOR}  ↗", PORTFOLIO, True)
+        link("Código no GitHub  ↗", f"https://github.com/{REPO}")
+        st = tk.Label(j, text=upd["msg"] or "Atualização automática pelo GitHub", bg=BG, fg=APAGADO,
+                      font=("Segoe UI", 9), wraplength=300)
+        st.pack(pady=(12, 4))
+        b = tk.Label(j, text="Verificar atualizações", bg=BG, fg=VERDE, font=("Segoe UI", 9, "underline"), cursor="hand2")
+        b.pack(pady=(0, 20))
+
+        def verificar():
+            threading.Thread(target=checar_update, daemon=True).start()
+
+            def acompanhar():
+                if j.winfo_exists():
+                    st.config(text=upd["msg"])
+                    if upd["estado"] in ("verificando", "baixando"):
+                        j.after(400, acompanhar)
+            j.after(300, acompanhar)
+        b.bind("<Button-1>", lambda e: verificar())
+        j.bind("<Escape>", lambda e: j.destroy())
+        self.cantos_arredondados(j, escuro=True)
+        j.update_idletasks()
+        j.geometry(f"380x{j.winfo_reqheight()}+{self.root.winfo_x() + 40}+{max(0, self.root.winfo_y() - 120)}")
+
+    def aplicar_cfg_web(self, k, v):
+        if k == "modo":
+            return self.mudar_modo(v)
+        if k == "idioma":
+            self.v_idioma.set(v)
+            return self.mudar_idioma()
+        if k == "sinc_audio":
+            self.v_sinc.set(v)
+            return self.mudar_sinc(v)
+        if k == "iniciar_windows":
+            self.v_inicio.set(bool(v))
+            return self.alternar_inicio()
+        if k == "fonte":
+            v = int(v)
+            self.v_fonte.set(v)
+            return self.set_cfg("fonte", v, True)
+        if k in ("original", "proxima"):
+            getattr(self, "v_orig" if k == "original" else "v_prox").set(bool(v))
+            return self.set_cfg(k, bool(v), k == "proxima")
+        if k == "atualizar_auto":
+            self.v_auto_upd.set(bool(v))
+        cfg[k] = v
+        salvar_cfg()
+
+    def reiniciar_para_atualizar(self):
+        if estado["app_id"] == INTERNO and estado["tocando"]:
+            self.root.after(5000, lambda: ui_fila.put(("reiniciar",)))  # não corta a música da plataforma
+            return
+        self.avisar("Ecolyra atualizado", upd["msg"])
+        atualizador.reiniciar()
+        self.root.after(400, self.sair)
+
+    def avisar(self, titulo, texto):
+        try:
+            if self.bandeja:
+                self.bandeja.notify(texto, titulo)
+        except Exception:
+            pass
 
     def dica_sinc(self):
         a, m = letra.get("auto"), self.offset_manual()
@@ -1859,13 +1738,22 @@ class App:
         M = pystray.MenuItem
         menu = pystray.Menu(
             M("Mostrar / esconder", lambda: ui_fila.put("alternar"), default=True),
+            M("Abrir a plataforma Ecolyra", lambda: ui_fila.put(("plataforma", "/agora"))),
+            M("Pesquisar música...", lambda: ui_fila.put(("pesquisar",))),
+            M("Modo de exibição", pystray.Menu(
+                M("Telas flutuantes", lambda: ui_fila.put(("cfg", "modo", "flutuante")),
+                  checked=lambda i: cfg.get("modo", "flutuante") == "flutuante", radio=True),
+                M("Aba única (plataforma)", lambda: ui_fila.put(("cfg", "modo", "plataforma")),
+                  checked=lambda i: cfg.get("modo") == "plataforma", radio=True))),
             pystray.Menu.SEPARATOR,
             M("Tocar / pausar", lambda: comandos.put(("pp",))),
             M("Próxima", lambda: comandos.put(("proxima",))),
             M("Anterior", lambda: comandos.put(("anterior",))),
             pystray.Menu.SEPARATOR,
+            M("Verificar atualizações", lambda: threading.Thread(target=checar_update, daemon=True).start()),
+            M(f"Sobre (Ecolyra {VERSAO} · by {CRIADOR})", lambda: ui_fila.put(("sobre",))),
             M("Fechar", lambda: ui_fila.put("sair")))
-        self.bandeja = pystray.Icon("ecolyra", Image.open(PNG), APP, menu)
+        self.bandeja = pystray.Icon("ecolyra", Image.open(PNG), f"{APP} {VERSAO}", menu)
         self.bandeja.run_detached()
 
     def esconder(self):
@@ -1879,6 +1767,10 @@ class App:
 
     def sair(self):
         parar_ouvinte()
+        try:
+            plataforma.servidor["http"].shutdown()
+        except Exception:
+            pass
         if self.bandeja:
             self.bandeja.stop()
         self.root.destroy()
@@ -1977,7 +1869,7 @@ class App:
         pares = [(letra["trad"][i] if i < len(letra["trad"]) else "", letra["linhas"][i][1])
                  for i in sorted(j.selec) if i < len(letra["linhas"])]
         titulo, artista, capa = estado["titulo"] or "", estado["artista"] or "", estado["capa"]
-        if letra.get("ident") and "spotify" not in (estado["app_id"] or "").lower():
+        if letra.get("ident") and not metadados_limpos(estado["app_id"]):
             titulo, artista = letra["ident"]  # nome certinho reconhecido pelo áudio, não o título do vídeo
         j.l_sel.config(text="Buscando a capa em alta...", fg=BRANCO)
 
@@ -2115,6 +2007,16 @@ class App:
                 self.esconder() if self.root.state() == "normal" else self.mostrar()
             if isinstance(pedido, tuple) and pedido[0] == "compartilhar":
                 self.abrir_compartilhar(*pedido[1])
+            elif isinstance(pedido, tuple) and pedido[0] == "cfg":
+                self.aplicar_cfg_web(pedido[1], pedido[2])
+            elif isinstance(pedido, tuple) and pedido[0] == "plataforma":
+                self.abrir_plataforma(pedido[1])
+            elif pedido == ("pesquisar",):
+                self.pesquisar()
+            elif pedido == ("sobre",):
+                self.sobre()
+            elif pedido == ("reiniciar",):
+                self.reiniciar_para_atualizar()
 
         # mostra/esconde os controles conforme o mouse
         px, py = self.root.winfo_pointerxy()
@@ -2226,11 +2128,30 @@ class App:
 
 
 if __name__ == "__main__":
+    reiniciado = "--reiniciado" in sys.argv
     _trava = socket.socket()
-    try:
-        _trava.bind(("127.0.0.1", 47811))  # já tem um aberto → não abre outro
-    except OSError:
+    for _ in range(40 if reiniciado else 1):  # depois de atualizar, espera o processo antigo sair
+        try:
+            _trava.bind(("127.0.0.1", 47811))  # já tem um aberto → não abre outro
+            break
+        except OSError:
+            if not reiniciado:
+                raise SystemExit
+            time.sleep(0.5)
+    else:
         raise SystemExit
+    iniciar_plataforma()
     threading.Thread(target=loop_player, daemon=True).start()
     threading.Thread(target=loop_sincronia, daemon=True).start()
-    App().root.mainloop()
+    threading.Thread(target=loop_atualizacao, daemon=True).start()
+    app = App()
+    novo = atualizador.novidades_instaladas()
+    if novo:
+        app.root.after(3000, lambda: app.avisar(f"Ecolyra atualizado para {novo['para']}",
+                                                "Veja as novidades em Configurações → Atualizações."))
+    if cfg.get("modo") == "plataforma":
+        app.esconder()
+        # depois de reiniciar, a janela que já estava aberta se reconecta sozinha; só abre se não voltar
+        app.root.after(6000 if reiniciado else 300,
+                       lambda: plataforma.pagina_aberta() or plataforma.abrir("/agora"))
+    app.root.mainloop()
