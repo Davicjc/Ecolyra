@@ -7,7 +7,7 @@
   <img alt="Windows 10/11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4?style=for-the-badge&logo=windows&logoColor=white">
   <img alt="Python 3.10+" src="https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white">
   <img alt="Atualização automática" src="https://img.shields.io/badge/update-autom%C3%A1tico-8A2BE2?style=for-the-badge&logo=github">
-  <img alt="Licença MIT" src="https://img.shields.io/badge/licen%C3%A7a-MIT-555?style=for-the-badge">
+  <img alt="Licença AGPL-3.0" src="https://img.shields.io/badge/licen%C3%A7a-AGPL--3.0-555?style=for-the-badge">
 </p>
 
 <p align="center">
@@ -264,4 +264,4 @@ Feito por **[davicjc](https://davicjc.github.io/PortfolioPessoal)** — o selo `
 
 ## 📄 Licença
 
-[MIT](LICENSE) © 2026 Davi Castro
+[AGPL-3.0](LICENSE) © 2026 Davi Castro, com crédito de autoria obrigatório ([ADDITIONAL-TERMS.md](ADDITIONAL-TERMS.md)).
